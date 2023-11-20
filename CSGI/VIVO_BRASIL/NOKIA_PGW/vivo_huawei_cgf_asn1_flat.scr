@@ -261,10 +261,14 @@ declare static record "vivo_irpt_transformacao" rIrptTransformExterno;
 declare static string gsCodCentral;
 declare static record	"vivo_irpt_transf_stage"	grIrptStage;
 
+declare static record "reference_table"         	hdl_SepCDRCenario;
+declare static record "vivo_tab_sep_cdr_cenario_rec"   	rec_SepCDRCenario;
+
 //d95354 - Big Data - ariana dias 05/03/2015
 declare static string gsCgi;
 
 declare static string 	gsServedMSISDN;
+declare static integer  giRecCount;
 
 //=============================================================================
 //			    PROTOTYPE DEFINITIONS
@@ -314,6 +318,11 @@ prototype hex_to_decimal (string sHex) returns string;
 
 prototype formataCgiEcgi ( string sCgiTemp) returns integer;
 
+prototype FiltraCenario
+(
+	string sMSISDN
+) returns integer;
+
 //-----------------------------------------------------------------------------
 //			    	  INIT
 //-----------------------------------------------------------------------------
@@ -333,7 +342,9 @@ declare integer iStatus;
 	gsFilename 		= dcs_cgdc_get_string_param (DCS_CGDC_FILENAME);
 	gdtDataProcessamento 	= cgdc_get_local_time();			//Data e hora do processamento
 	gsCritica		= "999";
+	giRecCount			= 0;
 	ALLOCATE( raw_data );
+	
 
 	//----------------------------------------------------------------------
 	//Inicializa tabela vivo_tab_portal_central
@@ -373,6 +384,16 @@ declare integer iStatus;
 		DCS_RETURN_ABORT;
 	}
 	ALLOCATE (rec_PlmnTadig);	
+
+	//Inicializa tabela de Separacao de Cenarios
+	hdl_SepCDRCenario = reference_open("vivo_tab_sep_cdr_cenario");
+	if ( hdl_SepCDRCenario == MAP(0) )
+	{
+		cgdc_puterr("OPEN_TBL", "[%s:%d] Unable to open table [%s]",
+					$scriptname, $linenumber, "vivo_tab_parametro");
+			DCS_RETURN_ABORT;
+	}
+	ALLOCATE (rec_SepCDRCenario);
 
 	//------------------------------------------------
 	// Tell ASN.1 API about the Ericcson GPRS7 tags.
@@ -580,14 +601,6 @@ procedure main
 		cgdc_error_write ( FORMAT ("asn1_get_typedef () failure for '%s'.\n", sTagName));
 		DCS_RETURN_REJECT;
 	}
-	//-----------------------------
-	// Filtra Cenarios
-	//------------------------------
-	if ( FiltraCenario(gsServedMSISDN) )
-	{
-		MANUAL_WRITE("ASN1", "FIL_CENAR_ASN1", INPUT, rec_size, DCS_OPER_MGR_GENERATED, 0);
-		MANUAL_WRITE("FLAT", "FIL_CENAR_FLAT", OUTPUT, iRecordLength, DCS_OPER_MGR_GENERATED, 0);
-	}
 	
 	//disables manual output
 	dcs_cgdc_opmgr_manual_output (FALSE); 
@@ -596,6 +609,17 @@ procedure main
 	//------------------------------
 	status = process_module (INPUT, asn1_pos, OUTPUT, iRecordLength);
 	giRecordLength = iRecordLength;
+	
+		//-----------------------------
+	// Filtra Cenarios
+	//------------------------------
+	if ( FiltraCenario(gsServedMSISDN) )
+	{
+		MANUAL_WRITE("ASN1", "FIL_CENAR_ASN1", INPUT, rec_size, DCS_OPER_MGR_GENERATED, 0);
+		MANUAL_WRITE("FLAT", "FIL_CENAR_FLAT", OUTPUT, iRecordLength, DCS_OPER_MGR_GENERATED, 0);
+	}
+	
+	
 	iStatus = TABLE (status)
 	{
 		DCS_OPER_ERROR 		=> 1
@@ -3644,4 +3668,4 @@ procedure FiltraCenario
     }
    
     return iRetorno;
-}
+} //
