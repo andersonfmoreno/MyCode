@@ -1,0 +1,2445 @@
+/*******************************************************************************
+	NOTICE:
+	THIS INFORMATION IS CONFIDENTIAL AND PROPRIETARY TO INTEC TELECOM
+	SYSTEMS, AND MAY NOT BE COPIED, MODIFIED, OR OTHERWISE USED.
+;+
+vivo_nokia_sgsn_to_flat
+
+Author:		Dionnys Peotta - (CSG)
+
+
+Function:	This script converts the Nokia SGSN ASN1 format to GPRS Flat.
+		
+Invocation:	From DCS Operation Manager - TRANSFORM Class
+
+Record
+ Definitions:	Input  - vivo_nokia_sgsn_asn1
+		Output - vivo_gprs_flattened_<module_name>
+
+		The term <module_name> means the name of one of the
+		4 CCO call modules.
+
+Overview:	Use the "constructed ASN.1" routines to extract each
+		tag (a.k.a. application) from the call module and the
+		optional event modules.  This implies the existence of:
+
+		o CGDC Record Definition 'ericsson_sgsn_r7_asn1' defining
+		  by tag number, each of the possible tags in the various
+		  modules.
+
+		o An Interface Definition Language (IDL) file, a.k.a.
+		  a "syntax file", with the same name, 'ericsson_sgsn_r7_asn1.asn1',
+		  defining the Single and Composite CDRs and their
+		  component parts.
+
+		o An ASN.1 Compiled Definition (ACD) file with the same
+		  name, and built from, the aforementioned Record Def,
+		  i.e., 'ericsson_sgsn_r7_asn1.acd'.
+
+		o The Application Programming Interface (API) provided by
+		  'cgdc_asn1_routines.c', containing a series of functions
+		  for use by CGDC to support the deconstruction of ASN.1 data.
+
+		Use the "virtual record" functions to simplify population
+		of the various flattened call module and event modules.
+		This implies the existence of:
+
+		o CGDC Record Definitions 'vivo_gsm_<module_name>' for
+		  the flattened call and event modules, using standard
+		  names for fields occurring in various modules, but at
+		  different offsets within the record.
+
+		o The API provided by 'cgdc_routines.c', containing a
+		  series of functions by CGDC to support virtual records.
+
+		Provide a header for each flattened module, giving:
+
+		o The module type, i.e., the module tag number.
+
+;-
+
+$log
+	Initial Version
+$log
+
+Modification History
+
+Revision 1.0  07/07/2023	Dionnys Peotta - Initial Version
+              
+
+******************************************************************************/
+
+
+//=============================================================================
+// 				I N C L U D E S
+//=============================================================================
+$$
+#include <dcs_cgdc.h>				// DCS Operation Manager
+$$
+#include <vivo_common_procedures.pro>   /* common procedures */
+
+//=============================================================================
+// 				D E F I N E S
+//=============================================================================
+#define TRUE	1
+#define FALSE	0
+
+//------------------------------------------------
+// Defines used for ASN1 functions and ...
+//------------------------------------------------
+#define CGDC_ASN1_VERIFY        1
+
+#define CGDC_ASN1_FIRST         1
+#define CGDC_ASN1_NEXT          2
+#define CGDC_ASN1_ROOT          3
+#define CGDC_ASN1_CHILD         4
+#define CGDC_ASN1_PARENT        5
+
+#define CGDC_ASN1_PRIMITIVE     1
+#define CGDC_ASN1_CONSTRUCTED   2
+
+#define CGDC_ASN1_ERROR         0
+
+#define MAX_RECORDSEQ  0xFFFFFF
+
+//------------------- M O D U L E S ----------------------------
+#define	SGSNPDPRecord_TAG	20
+#define	GGSNPDPRecord_TAG	21
+#define	SGSNSMORecord_TAG	23
+#define	SGSNSMTRecord_TAG	24
+#define SGWRecord_TAG	78
+//Dividino - Projeto 4G
+#define	PGWRecord_TAG	79
+//Fim - Projeto 4G
+
+#define	SGSNPDPRecord_Type	18
+#define	GGSNPDPRecord_Type	19
+#define	SGSNSMORecord_Type	21
+#define	SGSNSMTRecord_Type	24
+
+#define	SGSNPDPRecord		"SGSNPDPRecord-3gpp"
+#define	SGSNSMORecord		"SGSNSMORecord-3gpp"
+#define	SGSNSMTRecord		"SGSNSMTRecord-3gpp"
+
+#define TIPO_REGISTRO_FLAT	"S"
+
+//----> Causes For Record Closure
+#define CAUSENormalRelease		 		0
+#define CAUSEAbnormalRelease		 	4
+#define CAUSECamelInitCallRelease	 	5
+#define CAUSEVolumeLimit				16
+#define CAUSETimeLimit  				17
+#define CAUSESGSNChange 				18
+#define CAUSEMaxChangeCond				19
+#define CAUSEManagementIntervention		20
+#define CAUSEIntraSGSNIntersytemChange  21 
+#define CAUSEPLMNChange 	       		24
+#define CAUSErATChange					22
+#define CAUSEmSTimeZoneChange			23
+#define CAUSEunauthorizedRequestingNetwork 	52
+#define CAUSEunauthorizedLCSClient		53
+#define CAUSEpositionMethodFailure 		54
+#define CAUSEunknownOrUnreachableLCSClient 	58
+#define CAUSElistofDownstreamNodeChange		59 
+
+//----> SESSION STATUS
+#define SESSIONNormalRelease		"00"
+#define SESSIONAbnormalRelease		"01"
+#define SESSIONParcialRelease		"10"
+
+//---> Segundos referentes a 90 dias
+#define SEG_90D			 7776000
+#define SEG_180D		15552000
+#define SEG_360D		31104000
+
+
+//---------------------------------------------------
+// DEBUG_LEVEL defines the level of debug to display
+// 	0 - No Debug
+//	1 - Minimum Debug Info ( High Level)
+//	2 - Intermidiate Debug Info
+//	3 - Maximum Debug Info ( Low Level )
+//---------------------------------------------------
+
+#define DEBUG_LEVEL	0
+
+
+
+#define TRACE(arg)                   if ( DEBUG_LEVEL >=1 ){\
+                                        debug_ctl("append", "/tmp/cgdc_debug_vivo_nokia_sgsn_parsing");\
+                                        debug arg;\
+                                        debug_ctl("close", "/tmp/cgdc_debug_vivo_nokia_sgsn_parsing");}
+
+
+#define TRACE1(arg)                   if ( DEBUG_LEVEL >=2 ){\
+                                        debug_ctl("append", "/tmp/cgdc_debug_vivo_nokia_sgsn_parsing");\
+                                        debug arg;\
+                                        debug_ctl("close", "/tmp/cgdc_debug_vivo_nokia_sgsn_parsing");}
+
+
+#define TRACE2( arg )                   if ( DEBUG_LEVEL >=3 ){\
+                                        debug_ctl("append", "/tmp/cgdc_debug_vivo_nokia_sgsn_parsing");\
+                                        debug arg;\
+                                        debug_ctl("close", "/tmp/cgdc_debug_vivo_nokia_sgsn_parsing");}
+
+//------------------------------------------------
+//---> MACROS
+//------------------------------------------------
+#define ASN(tag_position, field) cast (field, :                         \
+                asn1_get_current_tag(FIELDINFO(field), tag_position))
+
+#define MANUAL_WRITE(port_list, rec_type, rec_buf, rec_size, disp, opt) \
+       iStatus = dcs_cgdc_opmgr_write_record                  \
+               (port_list, rec_type, rec_buf,                  \
+               rec_size, disp, opt);                           \
+       if (iStatus)                                           \
+       {                                                       \
+               cgdc_puterr ("WRITE_ERR",                        \
+                                                "%s %d: Failed to Manually Output record (%d) when processing file %s.", \
+                       $scriptname, $linenumber,               \
+                       giRecCount, dcs_cgdc_get_string_param(DCS_CGDC_EXT_FILENAME));      \
+       }
+
+//=============================================================================
+//			    GLOBAL VARIABLES
+//=============================================================================
+declare static integer 	giRecordCount;
+declare static integer 	giUplink;
+declare static integer 	giDownlink;
+declare static string 	gsServedMSISDN;
+declare static string 	gsServingNodePLMN;
+declare static integer  giSessionStatus;
+declare static integer  giRecordLength;
+
+declare static string 	gsExtEquip;
+declare static string	gsPortalEntrada;
+declare static string 	gsFilename;
+
+declare static record 	"cgdc_asn1_pos" 	asn1_composite_pos;
+declare static record 	"vivo_gprs7_raw_record" raw_data;
+
+declare static record 	"cgdc_asn1_ctx" 	asn1_ctx;
+declare static record 	"cgdc_asn1_pos" 	asn1_pos;
+
+// Tabela de Portal Central
+declare static record "reference_table"			hdl_PortalCentral;
+declare static record "vivo_tab_portal_central_rec"	rec_PortalCentral;
+
+// d95354 - Ariana Dias Coral - Accenture - 05/03/2015 
+declare static record "reference_table"			hdl_PlmnTadig;
+declare static record "vivo_tab_plmn_tadig_rec"	rec_PlmnTadig;
+
+declare static record "reference_table"         	hdl_SepCDRCenario;
+declare static record "vivo_tab_sep_cdr_cenario_rec"   	rec_SepCDRCenario;
+
+declare static datetime_string			gdtDataProcessamento;
+
+declare static string 	gsCritica;
+declare static string 	gsStartTime;
+declare static string 	gsVolume;
+declare static string 	gsDuration;
+declare static string 	gsDescrEPS;
+
+declare static record "vivo_irpt_transformacao" rIrptTransformExterno;
+declare static string gsCodCentral;
+declare static record	"vivo_irpt_transf_stage"	grIrptStage;
+declare static string gsCgi;
+
+declare static integer  giRecCount;
+
+//=============================================================================
+//			    PROTOTYPE DEFINITIONS
+//=============================================================================
+
+//-----
+prototype process_module
+(
+	record "vivo_nokia_sgsn_asn1" input, 
+	record "cgdc_asn1_pos" asn1_pos, 
+	record "null" output, 
+	integer ref iFlatRecSize
+) returns integer;
+
+//-----
+prototype process_module_tags
+(
+	record "vivo_nokia_sgsn_asn1" input,
+	record "cgdc_asn1_pos" asn1_pos,
+	string sRecType,
+	virtual_record module_flat,
+	integer iRecType
+);
+
+//-----
+prototype decode_tag
+(
+	record "vivo_nokia_sgsn_asn1" input,
+	record "cgdc_asn1_pos" asn1_pos,
+	string sRecType,
+	integer iTag,
+	virtual_record module_flat,
+	integer iRecType
+) returns integer;
+
+//-----
+prototype convert_date_or_time
+(
+	string asn_string
+) returns string;
+
+//-----
+prototype decode_listofTrafficVol
+(
+	record "vivo_nokia_sgsn_asn1" input,
+	record "cgdc_asn1_pos" asn1_pos,
+	integer iTag,
+	virtual_record module_flat
+) returns integer;
+
+//-----
+prototype decode_tag_level3
+(
+	record "vivo_nokia_sgsn_asn1" input,
+	record "cgdc_asn1_pos" asn1_pos,
+	integer iTag,
+	virtual_record module_flat
+) returns integer;
+
+//-----
+prototype Format_IP_Address
+(
+	string input
+)returns string;
+
+//-----
+prototype Format_accessPoint_Name
+(
+	string input
+)returns string;
+
+//-----
+prototype Format_Time
+(
+	string input
+)returns string;
+
+//-----
+prototype Swap 
+(
+	string number
+) returns string;
+
+//-----
+prototype IsValidCdr
+(
+	record "null" output
+) returns integer;
+
+//-----
+prototype CriticaCDR
+(
+	record "null" output
+);
+
+prototype Pow 
+(
+	integer iNumA, 
+	integer iNumB
+) returns unsigned long integer;
+
+prototype hex_to_long 
+(
+	string sHex, 
+	integer iNum
+) returns long integer;
+
+prototype hex_to_decimal 
+(
+	string sHex
+) returns string;
+
+prototype FiltraCenario
+(
+	string sMSISDN
+) returns integer;
+
+
+//-----------------------------------------------------------------------------
+//			    	  INIT
+//-----------------------------------------------------------------------------
+procedure init
+(
+        record "cgi_dcs_sysparm" SYSPARM
+)
+{
+declare integer iStatus;
+
+	TRACE1 ( ("\n:[INIT] INICIO " ) );
+
+	//---------------------------------------------------------------------
+	//		        SYSTEM INFORMATION
+	//---------------------------------------------------------------------
+	gsExtEquip 			= dcs_cgdc_get_string_param (DCS_CGDC_INP_EXT_EQUIP);
+	gsPortalEntrada 	= dcs_cgdc_get_string_param(DCS_CGDC_INP_DATA_PORTAL);
+	gsFilename 			= dcs_cgdc_get_string_param (DCS_CGDC_FILENAME);
+	gdtDataProcessamento 	= cgdc_get_local_time();			//Data e hora do processamento
+	gsCritica			= "999";
+	giRecCount			= 0;
+	ALLOCATE( raw_data );
+
+	//----------------------------------------------------------------------
+	//Inicializa tabela vivo_tab_portal_central
+	hdl_PortalCentral = reference_open("vivo_tab_portal_central");
+	if ( hdl_PortalCentral == MAP(0) )
+	{
+		cgdc_puterr("OPEN_TBL", "%s|%s [%s:%d] Unable to open table [%s]",
+			    gsExtEquip, gsPortalEntrada,
+			    $scriptname, $linenumber, "vivo_tab_portal_central");
+		DCS_RETURN_ABORT;
+	}
+	ALLOCATE (rec_PortalCentral);
+
+	//----------------------------------------------------------------------
+	//Busca regional na tabela de relacao Portal x Central
+	rec_PortalCentral.SYSTEM = gsExtEquip;
+	rec_PortalCentral.PORTAL = gsPortalEntrada;
+	iStatus = 0;
+	iStatus = reference_get (hdl_PortalCentral, rec_PortalCentral, CGDC_REFERENCE_EQUAL);
+
+	if (!iStatus)
+	{
+		cgdc_puterr("OPEN_TBL", "%s|%s [%s:%d] Portal nao cadastrado",
+			    gsExtEquip, gsPortalEntrada,
+			    $scriptname, $linenumber);
+		DCS_RETURN_ABORT;
+	}
+	
+	//----------------------------------------------------------------------
+	//Inicializa tabela vivo_tab_plmn_tadig
+	hdl_PlmnTadig = reference_open("vivo_tab_plmn_tadig");
+	if ( hdl_PlmnTadig == MAP(0) )
+	{
+		cgdc_puterr("OPEN_TBL", "%s|%s [%s:%d] Unable to open table [%s]",
+			    gsExtEquip, gsPortalEntrada,
+			    $scriptname, $linenumber, "vivo_tab_plmn_tadig");
+		DCS_RETURN_ABORT;
+	}
+	ALLOCATE (rec_PlmnTadig);	
+
+	//Inicializa tabela de Separacao de Cenarios
+	hdl_SepCDRCenario = reference_open("vivo_tab_sep_cdr_cenario");
+	if ( hdl_SepCDRCenario == MAP(0) )
+	{
+		cgdc_puterr("OPEN_TBL", "[%s:%d] Unable to open table [%s]",
+					$scriptname, $linenumber, "vivo_tab_parametro");
+			DCS_RETURN_ABORT;
+	}
+	ALLOCATE (rec_SepCDRCenario);
+
+	//------------------------------------------------
+	// Tell ASN.1 API about the Ericcson GPRS7 tags.
+	// It creates a context for all other functions.
+	//------------------------------------------------
+	iStatus = asn1_init (asn1_ctx, "vivo_nokia_sgsn_asn1", CGDC_ASN1_VERIFY);
+
+	//-----------------
+	// ASN1 Init OK ?
+	//-----------------
+	if (iStatus != CGDC_STATUS_OK)
+	{
+	    cgdc_error_write ("asn1_init () failure.\n");
+	    DCS_RETURN_REJECT;
+	}
+
+	//---------------------------------------------------------------------
+	//		        TABLE DEFINITIONS
+	//---------------------------------------------------------------------
+
+	//---------------------------------------
+	// Reference Table: TAP Recording Entity
+	//---------------------------------------
+
+
+	//----------------------------------------------------------------------
+	//Inicio IRPT (Inter-mediatE Reporting)
+	//Inicializa container de entrada
+	if ( Irpt_InicializaEntrada_VozDados@vivo_common_procedures() == 0 )
+	{
+		cgdc_puterr("NOKIA_SGSN","[%s:%d] Container %s nao inicializado",
+			    $scriptname, $linenumber, "vivo_irpt_entrada_voz_dados");
+		DCS_RETURN_ABORT;
+	}
+
+	//Inicializa container de transformacao
+	if ( Irpt_InicializaTransformacao@vivo_common_procedures() == 0 )
+	{
+		cgdc_puterr("NOKIA_SGSN","[%s:%d] Container %s nao inicializado",
+			    $scriptname, $linenumber, "vivo_irpt_transformacao");
+		DCS_RETURN_ABORT;
+	}
+	if ( Irpt_InicializaTransfStage@vivo_common_procedures() == 0 )
+	{
+		cgdc_puterr("NOKIA_SGSN","[%s:%d] Container %s nao inicializado",
+			    $scriptname, $linenumber, "vivo_irpt_transf_stage");
+		DCS_RETURN_ABORT;
+	}
+
+	// enables manual output
+	dcs_cgdc_opmgr_manual_output(TRUE);
+
+	//----------------------------------------------------
+	// Calls main() once more after last record.
+	//----------------------------------------------------
+	dcs_cgdc_term_processing ();
+
+	gsCodCentral = rec_PortalCentral.COD_CCC;
+	//----------------------
+
+	TRACE1 ( ("\n:[INIT] FIM " ) );
+	DCS_RETURN_OK;
+
+}
+
+//-----------------------------------------------------------------------------
+//                               M A I N
+//-----------------------------------------------------------------------------
+procedure main
+(
+	record "cgi_dcs_sysparm"		SYSPARM,
+	record "vivo_nokia_sgsn_asn1"	INPUT,
+	integer							rec_size,
+	record "null"					OUTPUT
+)
+{
+	TRACE1 ( ("\n:[MAIN] INICIO " ) );
+
+	declare	integer status;
+	declare	integer iStatus;
+	declare integer iTag;
+	declare string 	sTagName;
+	declare string 	sModuleName;
+	declare integer iRecordLength;
+	declare integer iRetorno;
+
+	gsServedMSISDN = "";
+
+	//-----------------------------------------------------------
+	// Process main(), once more after last record.
+	// dcs_cgdc_term_processing() called at init()
+	//-----------------------------------------------------------
+    if (1 == dcs_cgdc_get_integer_param (DCS_CGDC_LAST_CALL))
+	{
+		//---------------------------------------------------------------------------
+	  	// Tell ASN.1 API free all memory associated with processing an ASN.1 record
+		//---------------------------------------------------------------------------
+		asn1_term (asn1_ctx);
+		DCS_SET_RECORD_TYPE ("Last_Call");
+				
+		DCS_RETURN_OK;
+	}
+
+
+	giRecordCount 	= giRecordCount + 1;
+	giUplink 	= 0;
+	giDownlink 	= 0;
+
+	//---------------------------------------
+	// Build the ASN.1 tag tree.
+	// Tell ASN.1 API about this new record.
+	//---------------------------------------
+	status = asn1_new_rec (asn1_ctx, asn1_pos, INPUT, sizeof(INPUT), CGDC_ASN1_VERIFY);
+	if (status != CGDC_STATUS_OK)
+	{
+	    cgdc_error_write ("asn1_new_rec () failure.\n");
+	    DCS_RETURN_REJECT;
+	}
+	TRACE1 ( ("\n:[MAIN] Build ASN1 Sintaxe " ) );
+
+	
+	//-------------------------------------------------------------------
+	// The tag number of the current module is returned.
+	//--------------------------------------------------------------------
+	iTag = asn1_get_tag (asn1_pos);
+	sTagName = table (iTag)
+	{
+		//---------------------------------------------------------------------------------------
+		// Call details from the SGSN, containing information related to the radio network usage
+		//---------------------------------------------------------------------------------------
+		SGSNPDPRecord_TAG	=> SGSNPDPRecord;
+
+		default		=> ""
+		{
+			cgdc_error_write (FORMAT ("%s:%d: Unknown root tag encountered.\n", $scriptname, $linenumber));
+			DCS_RETURN_REJECT;
+		}
+	}
+
+	TRACE1 (("\n:[MAIN] iTag --> [%d]", iTag));
+	TRACE1 (("\n:[MAIN] sTagName --> [%s]", sTagName));
+
+    //----------------------------------------------
+    // Update the context of all tags, based on the
+    // syntax table found in the ACD file.
+    //----------------------------------------------
+	
+	status = asn1_get_typedef (asn1_pos, sTagName);
+	if (status)
+	{
+		cgdc_error_write ( FORMAT ("asn1_get_typedef () failure for '%s'.\n", sTagName));
+		DCS_RETURN_REJECT;
+	}
+	TRACE1 (("\n:[MAIN] get_typedef"));
+
+	
+	//-----------------------------
+	// Process the current module.
+	//------------------------------
+	status = process_module (INPUT, asn1_pos, OUTPUT, iRecordLength);
+	giRecordLength = iRecordLength;
+	iStatus = TABLE (status)
+	{
+		DCS_OPER_ERROR 		=> 1
+		{
+			iRetorno = CriticaCDR(OUTPUT);
+			TRACE1 (("\n:[MAIN] process_module status igual a DCS_OPER_ERROR\n"));
+			//--------------------------------------
+			// Possiveis retornos para CriticaCDR
+			//--------------------------------------
+			// DCS_RETURN_OK
+			// DCS_RETURN_SUSPEND
+			// DCS_RETURN_REJECT
+
+			return iRetorno;
+		}
+		DCS_OPER_OK_SKIP 	=> 1
+		{
+			iRetorno = CriticaCDR(OUTPUT);
+			TRACE1 (("\n:[MAIN] process_module status igual a DCS_OPER_OK_SKIP\n"));
+			//--------------------------------------
+			// Possiveis retornos para CriticaCDR
+			//--------------------------------------
+			// DCS_RETURN_OK
+			// DCS_RETURN_SUSPEND
+			// DCS_RETURN_REJECT
+
+			return iRetorno;
+		}
+		DEFAULT => 1
+		{
+			TRACE1 (("\n:[MAIN] process_module status igual a DEFAULT\n"));
+		}
+	}
+	
+	TRACE1 (("\n:[MAIN] Valida registro\n"));
+	//-----------------------------
+	// Valida registro
+	//------------------------------
+	status = IsValidCdr(OUTPUT);
+
+	iStatus = TABLE (status)
+	{
+		DCS_OPER_ERROR 	 => 1
+		{
+			iRetorno = CriticaCDR(OUTPUT);
+			TRACE1 (("\n:[MAIN] IsValidCdr status igual a DCS_OPER_ERROR\n"));
+			//--------------------------------------
+			// Possiveis retornos para CriticaCDR
+			//--------------------------------------
+			// DCS_RETURN_OK
+			// DCS_RETURN_SUSPEND
+			// DCS_RETURN_REJECT
+
+			return iRetorno;
+		}
+		DCS_OPER_OK_SKIP => 1
+		{
+
+			iRetorno = CriticaCDR(OUTPUT);
+			TRACE1 (("\n:[MAIN] IsValidCdr status igual a DCS_OPER_OK_SKIP\n"));
+			//--------------------------------------
+			// Possiveis retornos para CriticaCDR
+			//--------------------------------------
+			// DCS_RETURN_OK
+			// DCS_RETURN_SUSPEND
+			// DCS_RETURN_REJECT
+
+			return iRetorno;
+		}
+		DEFAULT => 1
+		{
+			TRACE1 (("\n:[MAIN] IsValidCdr status igual a DEFAULT\n"));
+		}
+	}
+
+	//-----------------------------
+	// Filtra Cenarios
+	//------------------------------
+	if ( FiltraCenario(gsServedMSISDN) )
+	{
+		MANUAL_WRITE("ASN1", "FIL_CENAR_ASN1", INPUT, rec_size, DCS_OPER_MGR_GENERATED, 0);
+		MANUAL_WRITE("FLAT", "FIL_CENAR_FLAT", OUTPUT, iRecordLength, DCS_OPER_MGR_GENERATED, 0);
+	}
+	
+	//disables manual output
+	dcs_cgdc_opmgr_manual_output (FALSE); 
+
+	//Sumariza informacoes dos registros de entrada
+    Irpt_SumarizaEntrada_VozDados@vivo_common_procedures(gsStartTime); //sDataHoraEvento (YYYYMMDDHHMMSS)
+
+    //Sumariza informacoes dos registros formatados OK.
+	if ( rIrptTransformExterno == MAP(0) ) 
+	{
+		ALLOCATE(rIrptTransformExterno); 
+		CLEAR(rIrptTransformExterno, ' '); 
+		CLEAR(rIrptTransformExterno.PARAM, ' ');
+	}
+
+	rIrptTransformExterno.STATUS 			= "F147";
+	rIrptTransformExterno.CENTRAL			= gsCodCentral;
+	rIrptTransformExterno.COD_ERRO			= "";
+	rIrptTransformExterno.TIPO_CDR 			= "";
+	rIrptTransformExterno.PARAM.LAYOUT_CDR 	= "";
+	rIrptTransformExterno.PARAM.TIPO_NUM_A 	= "";
+	rIrptTransformExterno.PARAM.TIPO_NUM_B 	= "";
+	rIrptTransformExterno.PARAM.TIPO_NUM_C 	= "";
+	rIrptTransformExterno.DATA_HR_EVENTO 	= gsStartTime; //sDataHoraEvento (YYYYMMDDHHMMSS);
+	rIrptTransformExterno.TOTAL_SEGUNDOS 	= gsDuration; //sSegundos
+	rIrptTransformExterno.TOTAL_BYTES 		= gsVolume; //sBytes
+	rIrptTransformExterno.PARAM.FLAG_EXTRA_RECORD = "";
+
+	Irpt_SumarizaTransformacao_v2@vivo_common_procedures(rIrptTransformExterno);
+
+
+	if ( grIrptStage == MAP(0) ) 
+	{
+		ALLOCATE(grIrptStage); 
+		CLEAR(grIrptStage, ' '); 
+		CLEAR(grIrptStage.PARAM, ' ');
+	}
+
+	grIrptStage.STATUS 				= "F147";
+	grIrptStage.CENTRAL				= gsCodCentral;
+	grIrptStage.COD_ERRO			= "";
+	grIrptStage.CLASSIFICACAO		= "";
+	grIrptStage.TIPO_CDR 			= "";
+	grIrptStage.PARAM.LAYOUT_CDR 	= "";
+	grIrptStage.PARAM.TIPO_NUM_A 	= "";
+	grIrptStage.PARAM.TIPO_NUM_B 	= "";
+	grIrptStage.PARAM.TIPO_NUM_C 	= "";
+	grIrptStage.DATA_HR_EVENTO		= gsStartTime; //sDataHoraEvento (YYYYMMDDHHMMSS);
+	grIrptStage.TOTAL_SEGUNDOS		= gsDuration;
+	grIrptStage.TOTAL_BYTES 		= gsVolume; //sBytes
+	grIrptStage.PARAM.FLAG_EXTRA_RECORD	= "";
+
+	Irpt_SumarizaTransfStage@vivo_common_procedures(grIrptStage);
+
+
+	DCS_SET_RECORD_TYPE (PREFIX(sTagName,7));
+	DCS_SET_OUTPUT_RECORD_LENGTH (iRecordLength);
+	DCS_ADD_PORTAL("CORR");
+
+	TRACE1 ( ("\n:[MAIN] FIM " ) );
+	DCS_RETURN_OK;
+
+} // end of main ()
+
+//--------------------------------------------------------------------------------
+// IsValidCdr .................................................
+//
+//Returns: DCS_OPER_OK		- CDR Valido, nao descartado
+//	   DCS_OPER_OK_SKIP	- Discard record
+//	   DCS_OPER_ERROR	- Discard record
+//--------------------------------------------------------------------------------
+procedure IsValidCdr
+(
+ record "null" 	output
+)
+{
+
+	declare record "vivo_ericsson_gprs_flat_v2" 	GPRS_FLAT;
+	declare integer iSessionStatus;
+	declare integer iStatus;
+	declare static datetime_string dtAux1;
+	declare static datetime_string dtAux2;
+	declare integer iAux1;
+	declare integer iAux2;
+	declare string  sDtAux1;
+	declare string  sDataVolumeUp;
+	declare string  sDataVolumeDown;
+	declare string  sDuration;
+
+	sDataVolumeUp 	= "";
+	sDataVolumeDown = "";
+	sDuration		= "";
+
+	GPRS_FLAT = MAP( output );
+
+	GPRS_FLAT.LINE_TERMINATOR = 0x0a;
+
+	//---------------------------------
+	// Campo recordType diferente de 18
+	//---------------------------------
+	if ( GPRS_FLAT.RECORD_TYPE != "S" )
+	{
+		gsCritica 	= "PG1";
+		gsDescrEPS 	= "Tipo de Registro Invalido.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//---------------------------------
+	// Campo ServedIMSI nao presente 
+	//---------------------------------
+	if ( cgdc_trim( GPRS_FLAT.SERVED_IMSI, ' ', 0) == "" )
+	{
+		gsCritica 	= "PG3";
+		gsDescrEPS 	= "Served IMSI nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//---------------------------------
+	// Campo locationAreaCode nao presente 
+	//---------------------------------
+	if ( cgdc_trim( GPRS_FLAT.LOCATION_AREA_CODE, ' ', 0) == "" )
+	{
+		gsCritica 	= "PGa";
+		gsDescrEPS 	= "LocationAreaCode nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//---------------------------------
+	// Campo cellIdentifier nao presente 
+	//---------------------------------
+	if ( cgdc_trim( GPRS_FLAT.CELL, ' ', 0) == "" )
+	{
+		gsCritica 	= "PGb";
+		gsDescrEPS 	= "CellIdentifier nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//--------------------------------------
+	// Campo ChargingID nao presente 
+	//--------------------------------------
+	if ( cgdc_trim( GPRS_FLAT.CHARGING_ID, ' ', 0) == "" )
+	{
+		gsCritica 	= "PG5";
+		gsDescrEPS 	= "Charging ID nao encontrado.";
+		return 	DCS_OPER_ERROR;
+	}
+
+	//----------------------------------
+	// Campo GGSNAddress nao presente
+	//----------------------------------
+	if ( cgdc_trim( GPRS_FLAT.GGSN_ADDRESS, ' ', 0) == "" )
+	{
+		gsCritica 	= "PG4";
+		gsDescrEPS 	= "GGSN Address nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//----------------------------------
+	// Campo servedPDPAddress nao presente
+	//----------------------------------
+	if ( cgdc_trim( GPRS_FLAT.SERVED_PDP_ADDRESS, ' ', 0) == "" && 
+		 cgdc_trim( GPRS_FLAT.IPV6_ADDRESS, ' ', 0) == "" )
+	{
+		gsCritica 	= "PG2";
+		gsDescrEPS 	= "PDP Address nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//----------------------------------
+	// Campo accessPointNameNI nao presente
+	//----------------------------------
+	if ( cgdc_trim( GPRS_FLAT.APN_NI, ' ', 0) == "" )
+	{
+		gsCritica 	= "PGc";
+		gsDescrEPS 	= "Acess Point Name NI nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+	
+	//----------------------------------
+	// Campo dataVolumeGPRSUpLink nao numerico
+	//----------------------------------
+	sDataVolumeUp = GPRS_FLAT.UPLINK;
+	if ( !cgdc_isdigits(sDataVolumeUp) )
+	{
+		gsCritica 	= "PGd";
+		gsDescrEPS 	= "Data Volume Uplink nao numerico.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//----------------------------------
+	// Campo dataVolumeGPRSUpLink nao numerico
+	//----------------------------------
+	sDataVolumeDown = GPRS_FLAT.DOWNLINK;
+	if ( !cgdc_isdigits(sDataVolumeDown) )
+	{
+		gsCritica 	= "PGd";
+		gsDescrEPS 	= "Data Volume Downlink nao numerico.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//----------------------------------
+	// Campo duration nao numerico
+	//----------------------------------
+	sDuration = GPRS_FLAT.DURATION;
+	if ( !cgdc_isdigits(sDuration) || sDuration == "" )
+	{
+		gsCritica 	= "PGe";
+		gsDescrEPS 	= "Duracao nao numerica.";
+
+		return 	DCS_OPER_ERROR;
+	}
+
+	//----------------------------------
+	// Campo servingNodePLMNIdentifier nao presente
+	//----------------------------------
+	if ( gsServingNodePLMN == "" )
+	{
+		gsCritica 	= "PGg";
+		gsDescrEPS 	= "PLMN-ID nao encontrado.";
+
+		return 	DCS_OPER_ERROR;
+	}
+	
+	if (GPRS_FLAT.SESSION_STATUS == "")
+	{
+		//------------------------------------
+		// Erro. Session Status nao presente.
+		//------------------------------------
+		gsCritica 	= "PGf";
+		gsDescrEPS 	= "Session Status nao encontrada.";
+		return 	DCS_OPER_ERROR;
+	}
+	
+	//---------------------------------------
+	// Campo AggregationCause n o presente ?
+	//---------------------------------------
+	if ( cgdc_trim( GPRS_FLAT.AGGREGATION_CAUSE, ' ', 0) == "" )
+	{
+		GPRS_FLAT.AGGREGATION_CAUSE 	= "000";
+	}
+
+	
+	//-----------------------------------------------------
+	// Verificacao de data/hora invalida usando o
+	// retorno da funcao cgdc_validate_datetime_str:
+	//   0: OK
+	//   1: ano invalido
+	//   2: mes invalido
+	//   3: dia invalido
+	//   4: hora invalida
+	//   5: minuto invalida
+	//   6: segundo invalido
+	//   7: milisegundos invalidos
+	//-----------------------------------------------------
+	
+	sDtAux1 = CONCAT (GPRS_FLAT.START_TIME, "000");
+
+	iStatus= TABLE( cgdc_validate_datetime_str(sDtAux1) )
+	{
+		1, 2, 3 => 1
+		{
+			gsCritica 	= "PG7";  //data invalida
+			gsDescrEPS 	= "Data/Hora invalida";
+
+			return DCS_OPER_ERROR;
+		}
+
+		4, 5,6,7 => 1
+		{
+			gsCritica 	= "PG7";  //hora invalida
+			gsDescrEPS 	= "Data/Hora invalida";
+
+			return DCS_OPER_ERROR;
+		}
+	}
+	// O ImE deixa passar "20000" no validate datetime,
+	// mas gera erro ao atribuir a uma variavel datetime_str
+	if ( SIZEOF(sDtAux1) <= 5 )
+	{
+		gsCritica 	= "PG7";  //hora invalida
+		gsDescrEPS 	= "Data/Hora invalida";
+
+		return DCS_OPER_ERROR;
+	}
+
+	dtAux1 = sDtAux1;
+
+	//----------------------------------------------------------------------
+	// Converte datas para inteiro (segundos desde 1/1/1970) para verificar
+	// se data do registro eh posterior a data de processamento.
+	//----------------------------------------------------------------------
+	//dtAux1 	= CONCAT (GPRS_FLAT.START_TIME, "000");
+	dtAux1 	= GPRS_FLAT.START_TIME;
+	iAux1 	= dtAux1;
+	//dtAux2 	= CONCAT (PREFIX(gdtDataProcessamento, 8), "000000000");
+	dtAux2 	= PREFIX(gdtDataProcessamento, 14);
+	iAux2 	= dtAux2;
+
+	//----------------------------------------------
+	// Data CDR posterior a data de processamento ?
+	//----------------------------------------------
+	if ( iAux1 > iAux2 )
+	{
+		gsCritica 	= "PG8";
+		gsDescrEPS 	= "Data bilhete posterior a data de processamento";
+
+		return DCS_OPER_ERROR;
+	}
+
+	//-----------------------------------------------------------
+	// Data do cdr e' 90 dias anterior a data do processamento ?
+	//-----------------------------------------------------------
+	// Comentar durante os testes
+	//if ( iAux1 < (iAux2 - SEG_90D) )
+	//{
+	//	gsCritica 	= "PG9";
+	//	gsDescrEPS 	= "Data do cdr 90 dias anterior a data do processamento";
+	//	return DCS_OPER_ERROR;
+	//}
+	
+	//	GPRS_FLAT.QCI = "";
+	if (GPRS_FLAT.APN_NI != "IMS")
+	{
+		GPRS_FLAT.QCI = "";
+	}
+			
+	return DCS_OPER_OK;
+
+}// Fim IsValidCdr
+
+
+//--------------------------------------------------------------------------------
+// P R O C E S S _ M O D U L E .................................................
+//
+//Returns: DCS_OPER_OK		- module successfully processed
+//	   DCS_OPER_OK_SKIP	- Discard record
+//	   DCS_OPER_ERROR	- Discard record
+//--------------------------------------------------------------------------------
+procedure process_module
+(
+ record  "vivo_nokia_sgsn_asn1" 	input,
+ record  "cgdc_asn1_pos" 		asn1_pos,
+ record "null" 				output,
+ integer ref 				iFlatRecSize
+)
+{
+	TRACE1 ( ("\n:[PROCESS_MODULE] INIT " ) );
+	
+	declare integer 	iStatus;
+	declare integer 	iTag;
+	declare string 		sTagName;
+	declare string 		sFlatRecordName;
+	declare virtual_record 	module_flat;
+
+	iTag 	 = asn1_get_tag (asn1_pos);
+	sTagName = asn1_get_tag_name(asn1_pos);
+	
+	//--------------------------------------------------------
+	// Create the record name to associate to virtual record.
+	//--------------------------------------------------------
+	sFlatRecordName = TABLE (iTag)
+	{
+		// Tag	20
+		SGSNPDPRecord_TAG	=> "vivo_ericsson_gprs_flat_v2";
+
+		default => ""
+	    {
+			gsCritica 	= "PG1";
+			return (DCS_OPER_ERROR);
+		}
+	}
+	
+	//-----------------------------------------
+	// Define a virtual record for this module
+	//-----------------------------------------
+	iStatus = cgdc_vrec_assoc (module_flat, sFlatRecordName);
+
+	if (iStatus == CGDC_STATUS_ERROR )
+	{
+		cgdc_error_code_write ("UNEXPECTED_RECDEF", "MINOR", "Unexpected Flattened Record Def '%s'.\n", sFlatRecordName);
+		return (DCS_OPER_ERROR);
+	}
+		
+	//-------------------------------------------
+	// Point Virtual Record associated to output
+	//-------------------------------------------
+	module_flat	= MAP (output);
+	
+	//-----------------------------------
+	// Get Record Size ov virtual record
+	//-----------------------------------
+	iFlatRecSize 	= cgdc_find_record_size (sFlatRecordName);
+	
+	//--------------------------------
+ 	// Fill Output record with blanks.
+ 	//--------------------------------
+	cgdc_memset (output, ' ', iFlatRecSize);
+
+	//----------------------------------------------------------
+	// Process all of the tags in all sublevels of this module.
+	//----------------------------------------------------------
+	if (process_module_tags (input, asn1_pos, sFlatRecordName, module_flat, iTag) )
+	{
+		TRACE1 (("\n%d:[PM02] ERROR  iTag=%d '%s' \n", giRecordCount, iTag, asn1_get_tag_name(asn1_pos)));
+		cgdc_error_write ("process_module_tags () failure.\n");
+		return (DCS_OPER_ERROR);
+	}
+
+	TRACE1 (("\n:[PROCESS_MODULE] FIM " ));
+	return (DCS_OPER_OK);
+
+} // Fim process_module ()
+
+
+//--------------------------------------------------------------------------------
+// P R O C E S S _ M O D U L E _ T A G S .......................................
+//
+//Process all the tags in the current call or event module.
+//
+//Returns: 0:	module successfully decoded
+//     	   1:	unrecognized tag
+//--------------------------------------------------------------------------------
+procedure process_module_tags
+(
+ record "vivo_nokia_sgsn_asn1" 	input,
+ record "cgdc_asn1_pos" 		asn1_pos,
+ string 				sRecType,
+ virtual_record 			module_flat,
+ integer 				iTagRecType
+)
+{
+	TRACE1 (("\n:[PROCESS_MODULE_TAGS] INIT "));
+	
+	declare integer iStatus;
+	declare integer iTag;
+	declare integer iTagError;
+	declare integer iTagBit;
+
+	declare record "cgdc_asn1_pos" new_pos;
+
+	//--------------------------------------------------------------
+	// Upon entry, we always should be at a constructed module tag.
+	//--------------------------------------------------------------
+	asn1_copy_handle (asn1_pos, new_pos);
+
+	//----------------------------------------------------------
+	// Move to the child of this constructed tag.
+	//----------------------------------------------------------
+	iStatus = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+	if (!iStatus)
+	{
+		cgdc_error_write ("asn1_find_tag () failure.\n");
+		return (1);
+	}
+
+	iTagBit 	= 0;
+	iTagError 	= FALSE;
+
+	//----------------------------------------------------------
+	// Loop, extracting each field from the module, and moving
+	// it to the field of the same name in the virtual record.
+	//----------------------------------------------------------
+	while (iStatus)
+	{
+		iTag = asn1_get_tag (new_pos);
+
+		//-----------------------------
+		// Mark bit map with this tag.
+		//-----------------------------
+$$
+		iTagBit = 0x80 >> iTag%8;
+$$
+	    
+		//-------------
+		// Decode Tags
+		//-------------
+		decode_tag (input, new_pos, sRecType, iTag, module_flat, iTagRecType);
+		
+		iStatus = asn1_find_tag (new_pos, CGDC_ASN1_NEXT, 0);
+
+	}
+
+	TRACE1 (("\n:[PROCESS_MODULE_TAGS] FIM "));
+	return (0);
+
+} // Fim process_module_tags ()
+
+
+//---------------------------------------------------------------------------------
+//   D E C O D E _ T A G
+//
+//Extract 'tag' data from ASN.1.
+//
+//Returns: 0:	tag successfully decoded
+//	   1:	unrecognized tag
+//----------------------------------------------------------------------------------
+procedure decode_tag
+(
+ record "vivo_nokia_sgsn_asn1" 	input,
+ record "cgdc_asn1_pos" 		asn1_pos,
+ string 				sRecType,
+ integer 				iTag,
+ virtual_record 			module_flat,
+integer 				iTagRecType
+) returns integer
+{
+	TRACE1 (("\n:[DECODE_TAG] INIT "));
+
+	declare record "cgdc_asn1_pos"       	new_pos;
+	declare record "cgdc_asn1_pos"       	prev_pos;
+	declare record "cgdc_asn1_pos"       	third_pos;
+	declare record "cgdc_asn1_pos"       	fourth_pos;
+	declare record "cgdc_asn1_pos"       	curr_pos;
+	declare record "field_info" 		fAux;
+
+	declare integer  status;
+	declare integer  ntag;
+	declare integer  iTarget;
+	declare integer  asn_integer;
+	declare integer  iStatus;
+	declare integer  iStatus1;
+	declare string 	 asn_ia5string;
+	declare string 	 sTemp;
+	declare string   sTemp2;
+	declare string   sChargingId;
+	declare unsigned integer iShortInteger;
+	declare string   sCgiTemp;
+	declare integer iReturn;
+	declare string  sApnNI;
+	declare string  sApnOI;
+
+	declare string sLac;
+	declare string sCn;
+	declare string sPlmn;
+	declare string sResult;
+	declare string sCellIdentifier;
+
+	// Projeto IPv6
+	declare string sAux;
+	declare string dig1;
+	declare string dig2;
+	declare string dig3;
+	declare string dig4;
+	declare string dig5;
+	declare string dig6;
+	declare string dig7;
+	declare string dig8;
+	
+	sTemp = "";
+	sTemp2 = "";
+	sChargingId = "";
+	sCgiTemp = "";
+	sLac = "";
+	sCn = "";
+	sPlmn = "";
+	sResult = "";
+	sCellIdentifier = "";
+	sApnNI = "";
+	sApnOI = "";
+	gsServingNodePLMN = "";
+	giSessionStatus = "";
+	
+
+	TRACE1 ( ("\n%d:[decode tag-02] Record Type=%d TAG = %d \n", giRecordCount, iTagRecType, iTag) )
+
+	iStatus = table ( iTagRecType  )
+	{
+		//-------------------------------------------------------------------------
+	   	// SGSNPDPRecord  - Module 0 ( 20 )
+	   	//-------------------------------------------------------------------------
+	   	SGSNPDPRecord_TAG => 1
+	   	{
+
+			iTarget = table (iTag)
+			{
+
+		    	// recordType
+		    	0		=> 0
+		    	{
+					asn_integer = ASN(asn1_pos, input.Integer);
+
+					if ( asn_integer == SGSNPDPRecord_Type )
+					{
+						//--------------------------------
+						// Atribue "S".
+						//--------------------------------
+						module_flat.RECORD_TYPE = TIPO_REGISTRO_FLAT;
+					}
+		    	}
+		    	// servedIMSI
+		    	3		=> 0
+		    	{	
+			    	module_flat.SERVED_IMSI = ASN(asn1_pos, input.IMSI);
+					TRACE1 ( ("\nSERVED_IMSI='%s' \n", module_flat.SERVED_IMSI) )
+					module_flat.SERVED_IMSI 	= Swap( ASN(asn1_pos, input.OctetString));
+					TRACE1 ( ("\nSERVED_IMSI='%s' \n", module_flat.SERVED_IMSI) )
+		    	}
+			    // servedIMEI
+		    	4		=> 0
+			    {			
+		    		module_flat.SERVED_IMEI = ASN(asn1_pos, input.IMEI);
+					TRACE1 ( ("\nSERVED_IMEI='%s' \n", module_flat.SERVED_IMEI) )
+					module_flat.SERVED_IMEI 	= Swap(ASN(asn1_pos, input.OctetString));
+					TRACE1 ( ("\nSERVED_IMEI='%s' \n", module_flat.SERVED_IMEI) )
+		    	}
+		    	8		=> 0
+		    	{			
+					// Implementacao MVNO Demanda 94131 Inicio
+					// Passa a utilizar o valor inteiro do LAC em hexa, e nao apenas o CN
+			 		//sTemp = cgdc_hex_to_integer ( ASN(asn1_pos, input.OctetString));
+			 		module_flat.LOCATION_AREA_CODE = ASN(asn1_pos, input.OctetString);
+
+		    	}
+				//  cellIdentifier
+		    	9		=> 0
+		    	{			
+					module_flat.CELL = ASN(asn1_pos, input.OctetString);				
+					sLac = module_flat.LOCATION_AREA_CODE;
+					sCn = SUFFIX (cgdc_hex_to_integer(sLac), 2);	
+
+					rec_PlmnTadig.CN = sCn;
+
+					//if (reference_search(hdl_PlmnTadig,rec_PlmnTadig))
+					//{		
+					//	sPlmn = rec_PlmnTadig.PLMN;
+
+						sCellIdentifier 	= cgdc_hex_to_integer ( ASN(asn1_pos, input.OctetString));					
+						while (sizeof(sCellIdentifier) < 5)
+						{
+							sCellIdentifier = concat("0",sCellIdentifier);
+						}				
+					
+						sLac = cgdc_hex_to_integer (sLac);
+						while (sizeof(sLac) < 5)
+						{
+							sLac = concat("0",sLac);
+						}						
+					
+						//sResult = CONCAT(sPlmn,sLac,sCellIdentifier);
+						sResult = CONCAT(sLac,sCellIdentifier);
+					
+						module_flat.CGI = sResult;						
+					//}
+					//else
+					//{
+					//	module_flat.CGI = "";	
+					//}					
+		    	}
+			    //  chargingID
+		    	10		=> 0
+		    	{		
+					sChargingId = ASN(asn1_pos, input.Integer);
+					//module_flat.CHARGING_ID       = hex_to_decimal(sChargingId);
+					module_flat.CHARGING_ID       = sChargingId;
+					TRACE1(("\nCHARGING_ID='%s' \n", module_flat.CHARGING_ID))
+		    	}
+	    		//  accessPointNameNI
+		    	12		=> 0
+		    	{			
+					clear( raw_data );
+					raw_data.data 			= ASN(asn1_pos, input.IA5String);
+					sApnNI = ASN(asn1_pos, input.IA5String);
+					cgdc_string_upper(sApnNI);
+					module_flat.APN_NI 		= sApnNI;				
+		    	}
+		    	// 15 - listOfTrafficVolume (SEQUENCE of)
+		    	15 		=> 0
+		    	{
+					//-----------------------------------------------------------
+					// Decode Tags Level 3
+					//-----------------------------------------------------------
+					decode_listofTrafficVol(input, asn1_pos, iTag, module_flat);
+		    	}
+			    //  recordOpeningTime
+		    	16		=> 0
+		    	{
+					gsStartTime = CONCAT( "20", PREFIX( ASN(asn1_pos, input.OctetString), 12));
+		    		module_flat.START_TIME 		= gsStartTime;
+		    	}
+		    	//  duration
+		    	17		=> 0
+		    	{
+					gsDuration = ASN(asn1_pos, input.Integer );
+					module_flat.DURATION 		= gsDuration;
+		    	}
+	    		// CauseForRecClosing
+		    	19		=> 0
+			    {
+					giSessionStatus = ASN(asn1_pos, input.Integer );
+					
+					module_flat.SESSION_STATUS = TABLE (giSessionStatus)
+					{
+
+						CAUSENormalRelease,
+						CAUSESGSNChange				=> SESSIONNormalRelease;
+						CAUSEAbnormalRelease		=> SESSIONAbnormalRelease;
+						CAUSECamelInitCallRelease,
+						CAUSEVolumeLimit,
+						CAUSETimeLimit,
+						CAUSEMaxChangeCond,
+						CAUSEManagementIntervention,
+						CAUSEIntraSGSNIntersytemChange,    
+						CAUSEPLMNChange,
+						CAUSErATChange,
+						CAUSEmSTimeZoneChange,
+						CAUSEunauthorizedRequestingNetwork,
+						CAUSEunauthorizedLCSClient,
+						CAUSEpositionMethodFailure,
+						CAUSEunknownOrUnreachableLCSClient,
+						CAUSElistofDownstreamNodeChange     	=> SESSIONParcialRelease;
+
+						DEFAULT => " ";
+					}
+		    	}
+	    		// Diagnostics - Tag 20
+		    	20		=> 0
+		    	{
+					TRACE1(("DIAGNOSTICS='%s' \n", module_flat.DIAGNOSTICS));
+					asn1_copy_handle (asn1_pos, new_pos);
+
+					// ManufacturerSpecificCause - Tag 4
+					status = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+					if ( status )
+					{
+						// Identifier - Tag 6
+						status = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+						if ( status )
+						{
+							// Information - Tag 2
+							status = asn1_find_tag (new_pos, CGDC_ASN1_NEXT, 0);
+							if ( status )
+							{
+								// Cause - Tag 0
+								status = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+								if ( status )
+								{
+									module_flat.DIAGNOSTICS = cgdc_substring(ASN(new_pos, input.OctetString ), 14, 2);	
+								}
+							}
+						}						
+					}
+		    	}
+	    		//  recordSequenceNumber
+		    	21		=> 0
+		    	{
+					asn_integer 	= ASN(asn1_pos, input.Integer );
+					module_flat.AGGREGATION_CAUSE	= FORMAT( "%3.3d", asn_integer);
+		    	}
+ 				// accessPointNameOI
+		    	26		=> 0
+		    	{
+					clear( raw_data );
+					raw_data.data 			= ASN(asn1_pos, input.IA5String);
+					sApnOI 					= ASN(asn1_pos, input.IA5String);
+					cgdc_string_upper(sApnOI);
+					module_flat.APN_OI	 	= sApnOI;
+			    }
+				// servedMSISDN
+		    	27		=> 0
+		    	{
+					sTemp 	=  Swap( ASN(asn1_pos, input.OctetString));
+
+					// remover TON NPI
+					if (SIZEOF(sTemp) == 15)
+					{
+						module_flat.SERVED_MSISDN = cgdc_substring(sTemp, 2, -1);
+					}
+					else
+					{
+						module_flat.SERVED_MSISDN = sTemp;
+					}
+
+					// Somente para os testes unitarios
+					// Remover apos os testes
+					gsServedMSISDN = module_flat.SERVED_MSISDN;
+		    	}
+				// rATType - Projeto Big Data
+		    	29		=> 0
+		    	{
+					module_flat.RAT_TYPE = ASN(asn1_pos, input.Integer);
+		    	}
+		    	//------------------------------------------------
+		    	//  5 - gsnAddres      - This only one level down
+		    	// 11 - gsnAddresUsed  - This only one level down
+		    	// 14 - servedAddress  - This is 2 levels down
+		    	// 20 - diagnostics	   - This is 1 levels down
+		    	//------------------------------------------------
+		    	5, 11, 14, 20, 36 => 0
+		    	{
+					asn1_copy_handle (asn1_pos, new_pos);
+
+					//----------------------------------------------
+					// Go to the 2nd(Child) level.
+					//------------------------------------------------
+					status = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+					if (!status)
+					{
+						cgdc_error_write ("asn1_find_tag () failure.\n");
+						return (1);
+					}
+
+					ntag = asn1_get_tag (new_pos);
+					//TRACE1 ( ("\n%d:(decode tag-03) TAG=%d, NUEVA TAG=%d '%s' \n", giRecordCount, iTag, ntag, asn1_get_tag_name(new_pos)) )
+
+					iStatus1 = TABLE(iTag)
+					{
+						//  5 - gsnAddres      - This only one level down
+						5 => 1
+						{
+							module_flat.SGSN_ADDRESS = Format_IP_Address( ASN(new_pos, input.OctetString));
+						}
+
+						// 11 - gsnAddresUsed  - This only one level down
+						11 => 1
+						{
+							module_flat.GGSN_ADDRESS = Format_IP_Address( ASN(new_pos, input.OctetString) );
+						}
+
+						// 20 - diagnostics	   - This is 1 levels down
+						20 => 1
+				    	{
+							module_flat.DIAGNOSTICS = ASN(new_pos, input.Integer );
+			    		}
+						DEFAULT => 1
+						{	// tag is either 14
+
+							asn1_copy_handle (new_pos, third_pos);
+
+							status 	= asn1_find_tag (third_pos, CGDC_ASN1_CHILD, 0);
+							ntag 	= asn1_get_tag (third_pos);
+
+							if ( iTag == 14 )
+							{
+								if (status)
+								{
+									if ( ntag == 0 )
+									{
+										sAux = ASN(third_pos, input.OctetString);
+										module_flat.SERVED_PDP_ADDRESS = Format_IP_Address( ASN(third_pos, input.OctetString));
+
+									}
+									else if ( ntag == 1 )
+									{
+										sAux = ASN(third_pos, input.OctetString);
+
+										dig1 = cgdc_substring (sAux, 0, 4);
+										dig2 = cgdc_substring (sAux, 4, 4);
+										dig3 = cgdc_substring (sAux, 8, 4);
+										dig4 = cgdc_substring (sAux, 12, 4);
+										dig5 = cgdc_substring (sAux, 16, 4);
+										dig6 = cgdc_substring (sAux, 20, 4);
+										dig7 = cgdc_substring (sAux, 24, 4);
+										dig8 = cgdc_substring (sAux, 28, 4);
+
+										module_flat.IPV6_ADDRESS = (FORMAT ("%s:%s:%s:%s:%s:%s:%s:%s" , dig1, dig2, dig3, dig4, dig5, dig6, dig7, dig8 ));
+									}
+								}
+							}
+							if ( iTag == 36 )
+                    		{
+                        		if (status)
+                        		{
+		                            if ( ntag == 0 )
+                            		{
+		                                sAux = ASN(third_pos, input.OctetString);
+										module_flat.SERVED_PDP_ADDRESS = Format_IP_Address( ASN(third_pos, input.OctetString));
+									}
+									else if ( ntag == 1 )
+									{
+										sAux = ASN(third_pos, input.OctetString);
+
+										dig1 = cgdc_substring (sAux, 0, 4);
+										dig2 = cgdc_substring (sAux, 4, 4);
+										dig3 = cgdc_substring (sAux, 8, 4);
+										dig4 = cgdc_substring (sAux, 12, 4);
+										dig5 = cgdc_substring (sAux, 16, 4);
+										dig6 = cgdc_substring (sAux, 20, 4);
+										dig7 = cgdc_substring (sAux, 24, 4);
+										dig8 = cgdc_substring (sAux, 28, 4);
+								
+										module_flat.IPV6_ADDRESS = (FORMAT ("%s:%s:%s:%s:%s:%s:%s:%s" , dig1, dig2, dig3, dig4, dig5, dig6, dig7, dig8 ));
+									}
+                        		}
+                    		}					
+						}
+					}
+
+					asn1_copy_handle (new_pos, asn1_pos);
+
+		    	}
+				// servingNodePLMNIdentifier
+		    	38		=> 0
+		    	{
+					sTemp 	=  Swap( ASN(asn1_pos, input.OctetString));
+					
+					gsServingNodePLMN = sTemp;
+					module_flat.CGI = CONCAT(gsServingNodePLMN, module_flat.CGI);
+
+					TRACE1(("servingNodePLMNIdentifier='[%s]' \n", gsServingNodePLMN));
+					TRACE1(("module_flat.CGI='[%s]' \n", module_flat.CGI));
+
+					
+		    	}
+   		    	DEFAULT => 0;
+			}
+		}
+    	default => 0;
+	}
+
+	TRACE1 (("\n:[DECODE_TAG] FIM "));
+	return 0;
+
+} // Fim decode_tag ()
+
+//---------------------------------------------------------------------------------
+//   decode_listofTrafficVol
+//
+//Extract 'tag' data from ASN.1.
+//
+//Returns: 0:	tag successfully decoded
+//	 1:	unrecognized tag
+//----------------------------------------------------------------------------------
+procedure decode_listofTrafficVol
+(
+ record "vivo_nokia_sgsn_asn1" 	input,
+ record "cgdc_asn1_pos" 		first_pos,
+ integer	 			iTag,
+  virtual_record 			module_flat
+) returns integer
+{
+	declare record "cgdc_asn1_pos"       	new_pos;
+	declare record "cgdc_asn1_pos"       	prev_pos;
+	declare record "cgdc_asn1_pos"       	fourth_pos;
+	declare record "cgdc_asn1_pos"       	curr_pos;
+	declare record "field_info" 		fAux;
+
+	declare integer status;
+	declare integer ntag;
+
+	declare integer iTarget;
+	declare integer asn_integer;
+	declare integer iStatus;
+	declare integer iTemp;
+	declare string  sTemp;
+	declare string  sTempOctet_L;
+	declare string  sTempOctet_R;
+
+	declare unsigned integer iBit_L;
+	declare unsigned integer iBit_R;
+	declare unsigned integer iBitValue;
+
+	sTempOctet_L 	= "";
+	sTempOctet_R	= "";
+	iBit_L 		= 0;
+	iBit_R 		= 0;
+	iBitValue 	= 0xFFFF;
+
+	sTemp 		= module_flat.UPLINK;
+	sTemp 		= cgdc_trim( sTemp, ' ', 0);
+
+	if (  cgdc_isdigits( sTemp ) )
+	{
+		giUplink = sTemp;
+	}
+	else
+	{
+		giUplink = 0;
+	}
+
+
+	sTemp = module_flat.DOWNLINK;
+	sTemp = cgdc_trim( sTemp, ' ', 0);
+
+	if (  cgdc_isdigits( sTemp ) )
+	{
+		giDownlink = sTemp;
+	}
+	else
+	{
+		giDownlink = 0;
+	}
+
+    //------------------------------------
+	// Tag level at [UNIVERSAL 16]
+    //------------------------------------
+	status = asn1_find_tag (first_pos, CGDC_ASN1_CHILD, 0);
+	if ( status )
+	{
+        asn1_copy_handle (first_pos, prev_pos);
+
+        //-----------
+        // Get first.
+        //-----------
+	    status = asn1_find_tag (prev_pos, CGDC_ASN1_FIRST, 0);
+
+	    //---------------------------------------------------
+	    // Parse all tags at this level[ UNIVERSAL 16].
+	    //---------------------------------------------------
+	    while (status)
+	    {
+
+	        asn1_copy_handle (prev_pos, new_pos);
+
+            //------------------------------------
+			// Go to next(child) level.
+            //------------------------------------
+            status = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+
+			if ( status )
+			{
+				status = asn1_find_tag (new_pos, CGDC_ASN1_FIRST, 0);
+				while (status)
+				{
+					ntag = asn1_get_tag (new_pos);
+			     	iTarget = table (ntag)
+					{
+						// qosRequested
+						1 => 0
+						{
+							module_flat.MEAN_THROUGHPUT_REQUESTED = 0;	
+							module_flat.PEAK_THROUGHPUT_REQUESTED = 0;
+						}
+						// qosNegociated
+						2 => 0
+ 						{
+							module_flat.MEAN_THROUGHPUT_NEGOTIATED = 0;
+							module_flat.PEAK_THROUGHPUT_NEGOTIATED = 0;
+						}
+						3 => 0
+						{
+							sTemp = ASN(new_pos, input.Integer);
+							if (  cgdc_isdigits( sTemp ) )
+							{
+								iTemp 		= sTemp;
+								giUplink 	= giUplink + iTemp;
+							}
+						}
+						4 => 0
+						{
+							sTemp = ASN(new_pos, input.Integer);
+							if (  cgdc_isdigits( sTemp ) )
+							{
+								iTemp 		= sTemp;
+								giDownlink 	= giDownlink + iTemp;
+							}
+						}
+						6 => 0
+						{
+							sTemp = PREFIX( ASN(new_pos, input.OctetString), 12);
+							module_flat.END_TIME = CONCAT( "20", sTemp );
+						}
+						9 => 0
+						{
+							status = asn1_find_tag (new_pos, CGDC_ASN1_CHILD, 0);
+							while (status)
+							{
+								ntag = asn1_get_tag (new_pos);
+								iTarget = table (ntag)
+								{
+									// qci
+									1 => 0
+									{
+										sTemp = ASN(new_pos, input.Integer);
+										module_flat.QCI = sTemp;
+									}
+								}
+								status = asn1_find_tag (new_pos, CGDC_ASN1_NEXT, 0);
+							}
+						}
+						DEFAULT => 0;
+			        }
+					status = asn1_find_tag (new_pos, CGDC_ASN1_NEXT, 0);
+				}
+			}
+			status = asn1_find_tag (prev_pos, CGDC_ASN1_NEXT, 0);
+	    }
+	}
+
+	module_flat.UPLINK   	= giUplink;
+	module_flat.DOWNLINK 	= giDownlink;
+
+	//-----------------------------------------
+	// Total Volume = Uplink + DownLink Volume
+	//-----------------------------------------
+	gsVolume	= giUplink + giDownlink;
+	module_flat.VOLUME 	= gsVolume;
+
+	return 0;
+
+}// Fim decode_listofTrafficVol
+
+
+//---------------------------------------------------------------------------------
+//   D E C O D E _ T A G _ L E V E L 3
+//
+//Extract 'tag' data from ASN.1.
+//
+//Returns: 0:	tag successfully decoded
+//	 1:	unrecognized tag
+//----------------------------------------------------------------------------------
+procedure decode_tag_level3
+(
+ record "vivo_nokia_sgsn_asn1" 	input,
+ record "cgdc_asn1_pos" 		third_pos,
+ integer 				iTag,
+ virtual_record 			module_flat
+) returns integer
+{
+	declare record "cgdc_asn1_pos"       	new_pos;
+	declare record "cgdc_asn1_pos"       	prev_pos;
+	declare record "cgdc_asn1_pos"       	fourth_pos;
+	declare record "cgdc_asn1_pos"       	curr_pos;
+	declare record "field_info" 		fAux;
+
+	declare integer status;
+	declare integer ntag;
+
+
+	declare integer iTarget;
+	declare integer asn_integer;
+	declare integer iStatus;
+
+     	iTarget = table (iTag)
+	{
+		1 => 0
+		{
+			//---------------------
+			// Go down two levels.
+			//---------------------
+			status = asn1_find_tag (third_pos, CGDC_ASN1_CHILD, 0);
+			status = asn1_find_tag (third_pos, CGDC_ASN1_CHILD, 0);
+			while (status)
+			{
+				ntag = asn1_get_tag (third_pos);
+				//TRACE2 ( ("\n %d: [PMT15-01] iTag=%d", giRecordCount, ntag) )
+
+				//-----------------------------------------------------------
+				// Decode Tags Level 4
+				//-----------------------------------------------------------
+			     	iTarget = table (ntag)
+				{
+					0 => 0
+					{
+						module_flat.qoR_reliability 	= ASN(third_pos, input.Enumerated );
+					}
+
+					1 => 0
+					{
+						module_flat.qoR_delay 		= ASN(third_pos, input.Enumerated);
+					}
+
+					2 => 0
+					{
+						module_flat.qoR_precedence 	= ASN(third_pos, input.Enumerated);
+					}
+
+					3 => 0
+					{
+						module_flat.qoR_peakThrough 	= ASN(third_pos, input.Enumerated);
+					}
+
+					4 => 0
+					{
+						module_flat.qoR_meanThrough 	= ASN(third_pos, input.Enumerated);
+					}
+
+					DEFAULT => 0;
+			       }
+
+				status = asn1_find_tag (third_pos, CGDC_ASN1_NEXT, 0);
+			}
+			return 0;
+		}
+
+		2 => 0
+		{
+			//---------------------
+			// Go down two levels.
+			//---------------------
+			status = asn1_find_tag (third_pos, CGDC_ASN1_CHILD, 0);
+			status = asn1_find_tag (third_pos, CGDC_ASN1_CHILD, 0);
+
+			while (status)
+			{
+				ntag = asn1_get_tag (third_pos);
+				//TRACE2 ( ("\n %d: [PMT15-01] iTag=%d", giRecordCount, ntag) )
+
+				//-----------------------------------------------------------
+				// Decode Tags Level 4
+				//-----------------------------------------------------------
+			    iTarget = table (ntag)
+				{
+					0 => 0
+					{
+						module_flat.qoN_reliability 	= ASN(third_pos, input.Enumerated );
+
+					}
+
+					1 => 0
+					{
+						module_flat.qoN_delay 		= ASN(third_pos, input.Enumerated);
+					}
+
+					2 => 0
+					{
+						module_flat.qoN_precedence 	= ASN(third_pos, input.Enumerated);
+					}
+
+					3 => 0
+					{
+						module_flat.qoN_peakThrough 	= ASN(third_pos, input.Enumerated);
+					}
+
+					4 => 0
+					{
+						module_flat.qoN_meanThrough 	= ASN(third_pos, input.Enumerated);
+					}
+
+					DEFAULT => 0;
+
+			       }
+				status = asn1_find_tag (third_pos, CGDC_ASN1_NEXT, 0);
+				//TRACE1 ( ("\n%d:[PMT_15-02] iTag = %d '%s' \n", giRecordCount, asn1_get_tag(third_pos), asn1_get_tag_name(third_pos)) )
+			}
+			return 0;
+		}
+
+		3 => 0
+		{
+			module_flat.dataVolUplink 	= ASN(third_pos, input.Integer);
+		}
+
+		4 => 0
+		{
+			module_flat.dataVolDownlink 	= ASN(third_pos, input.Integer);
+		}
+
+		5 => 0
+		{
+			module_flat.changeCondition 	= ASN(third_pos, input.Enumerated);
+		}
+
+		6 => 0
+		{
+			module_flat.changeTime 		= Format_Time( ASN(third_pos, input.OctetString));
+		}
+
+	    DEFAULT => 0;
+       }
+	return 0;
+
+}//Fim decode_tag_level3
+
+//--------------------------------------------------------------------------------
+// C O N V E R T _ D A T E _ O R _ T I M E .....................................
+//
+//Converts 6-byte hex string to ASCII equivalent, e.g.
+//December 23, 2003 would be passed as string "030C17" and returned as "031224"
+//
+//--------------------------------------------------------------------------------
+
+procedure convert_date_or_time
+(
+ string input
+) returns string
+{
+//TRACE2 ( ("%d: input = '%s'\n", giRecordCount, input) )
+	return (FORMAT ("%02d%02d%02d",
+		    cgdc_hex_to_integer (PREFIX (input, 2)),
+		    cgdc_hex_to_integer (cgdc_substring (input, 2, 2)),
+		    cgdc_hex_to_integer (cgdc_substring (input, 4, 2))));
+
+} // Fim convert_date_or_time //
+
+
+//---------------------------------------------------------------------------------
+//   		F O R M A T  I P  A D D R E S S
+// Formats string in IP address
+//Input:   input
+//
+//Returns: string in IP address format
+//----------------------------------------------------------------------------------
+procedure Format_IP_Address
+(
+	 string input
+)returns string
+{
+
+	declare string dig1;
+	declare string dig2;
+	declare string dig3;
+	declare string dig4;
+
+
+	//dig1 = suffix(concat ("000",cgdc_hex_to_integer ( cgdc_substring (input, 0, 2))),3);
+	//dig2 = suffix(concat ("000",cgdc_hex_to_integer ( cgdc_substring (input, 2, 2))),3);
+	//dig3 = suffix(concat ("000",cgdc_hex_to_integer ( cgdc_substring (input, 4, 2))),3);
+	//dig4 = suffix(concat ("000",cgdc_hex_to_integer ( cgdc_substring (input, 6, 2))),3);
+
+	dig1 = cgdc_hex_to_integer ( cgdc_substring (input, 0, 2));
+	dig2 = cgdc_hex_to_integer ( cgdc_substring (input, 2, 2));
+	dig3 = cgdc_hex_to_integer ( cgdc_substring (input, 4, 2));
+	dig4 = cgdc_hex_to_integer ( cgdc_substring (input, 6, 2));
+
+	return (FORMAT ("%s.%s.%s.%s" , dig1, dig2,dig3, dig4 ));
+
+}// Fim Format_IP_Address
+
+
+//---------------------------------------------------------------------------------
+//   		Format_accessPoint_Name
+// Formats Access Point Name
+//Input:   input
+//
+//Returns: string
+//----------------------------------------------------------------------------------
+procedure Format_accessPoint_Name
+(
+	 string input
+)returns string
+{
+	declare integer max;
+	declare integer largo;
+	declare integer pos;
+	declare string dom;
+
+	max = sizeof( input );
+	pos = 0;
+	dom = "";
+	while ( pos < max  )
+	{
+		if ( BYTE(raw_data.data, pos ) < 0x30 )
+		{
+			dom = concat( dom, "." );
+		}
+		else
+		{
+			dom = concat( dom, cgdc_substring (input, pos, 1 ) );
+		}
+		pos = pos + 1;
+	}
+	return( dom );
+
+} // Fim Format_accessPoint_Name
+
+//---------------------------------------------------------------------------------
+//   		F O R M A T _ T I M E
+// Formats Access Point Name
+//Input:   input
+//
+//Returns: string
+//----------------------------------------------------------------------------------
+procedure Format_Time
+(
+	 string input
+)returns string
+{
+	declare string str1;
+	declare string str2;
+	declare string str3;
+	declare string sSinal;
+
+	//-------------------------------
+	//	012345678901234567890
+	//	0407210108142D0300
+	//      20040721010814+03:00
+	//-------------------------------
+
+	str1 =  cgdc_substring (input, 0, 12);
+	str2 =  cgdc_substring (input, 13, 1);
+	if ( str2 == "D" )
+	{
+	  sSinal = "+";
+	}
+	else
+	{
+	  sSinal = "-";
+	}
+	str2 = cgdc_substring (input, 14, 2);
+	str3 = cgdc_substring (input, 16, 2);
+
+
+	return (FORMAT ("20%s%s%s:%s" , str1, sSinal, str2, str3 ));
+
+} // Fim Format_Time
+
+//------------------------------------------------------------------------------
+// Procedure: Swap
+// Function: Swap Numbers and remove "F"
+//------------------------------------------------------------------------------
+procedure Swap
+(	string     sNumber
+) returns string
+{
+	declare integer iAux;
+	declare integer iMax;
+	declare string sReturnString;
+
+
+	cgdc_swap_chars( sNumber );
+
+	sReturnString 	= "";
+	iAux 		= 0;
+	iMax 		= sizeof( sNumber );
+
+	while( iAux < iMax )
+	{
+		if ( cgdc_substring( sNumber, iAux, 1 ) != "F" )
+		{
+			sReturnString = CONCAT( sReturnString, cgdc_substring(sNumber, iAux, 1));
+		}
+
+		iAux = iAux + 1;
+	}
+
+	return( sReturnString );
+
+}// Fim Swap
+
+procedure CriticaCDR
+(
+ record "null" 	output
+)
+{
+TRACE1(("CriticaCDR - INIT"));
+
+	declare record "cgi_ascii_record"		rCritica;
+	declare string 					sDestino;
+	declare integer 				iAlarme;
+	declare integer 				iFunctionReturn;
+	declare string					sAux;
+
+	ALLOCATE(rCritica);
+	
+	//-----------------------------------------------------------------------
+       	// Sumariza informacoes dos registros de entrada (fora header e trailer).
+	//-----------------------------------------------------------------------
+   	Irpt_SumarizaEntrada_VozDados@vivo_common_procedures( gsStartTime );
+	
+    DCS_SET_RECORD_TYPE(gsCritica);
+
+	sDestino 	= "";
+	iAlarme 	= 0;
+	iFunctionReturn = DestCriticas@vivo_common_procedures(gsCritica,sDestino,iAlarme);
+
+	if (iFunctionReturn == FALSE)
+	{
+		cgdc_error_code_write("999","MINOR",
+			"[%s|%s] [%s] [Codigo de Erro nao cadastrado] [%s:%d] [%s]",
+	 		gsExtEquip, gsPortalEntrada, gsCritica, $scriptname, $linenumber, gsFilename);
+	        Mensagens_EPS@vivo_common_procedures ( "999", concat("Erro Nao Cadastrado:",gsCritica));
+		dcs_cgdc_set_record_type("999");
+	}
+
+	TRACE1(("CriticaCDR - gsCritica --> [%s]\n", gsCritica));
+	TRACE1(("CriticaCDR - sDestino --> [%s]\n", sDestino));
+
+	if (sDestino == "R" || sDestino == "S")
+	{
+
+	    //----------------------------------------------------------------------
+		// Envio do registro para EPS
+		//----------------------------------------------------------------------
+
+	        //--------------------------------------------------------------
+		//Inicio IRPT (Inter-mediatE Reporting)
+		//Sumariza informacoes dos registros criticados.
+		
+		if ( rIrptTransformExterno == MAP(0) ) 
+		{
+			ALLOCATE(rIrptTransformExterno); 
+			CLEAR(rIrptTransformExterno, ' '); 
+			CLEAR(rIrptTransformExterno.PARAM, ' ');
+		}
+
+		rIrptTransformExterno.STATUS 			= CONCAT("E", gsCritica);
+		rIrptTransformExterno.CENTRAL			= gsCodCentral;
+		rIrptTransformExterno.COD_ERRO			= "";
+		rIrptTransformExterno.TIPO_CDR 			= "";
+		rIrptTransformExterno.PARAM.LAYOUT_CDR 	= "";
+		rIrptTransformExterno.PARAM.TIPO_NUM_A 	= "";
+		rIrptTransformExterno.PARAM.TIPO_NUM_B 	= "";
+		rIrptTransformExterno.PARAM.TIPO_NUM_C 	= "";
+		rIrptTransformExterno.DATA_HR_EVENTO 	= gsStartTime; //sDataHoraEvento (YYYYMMDDHHMMSS);
+		rIrptTransformExterno.TOTAL_SEGUNDOS 	= ""; //sSegundos
+		rIrptTransformExterno.TOTAL_BYTES 		= "1"; //sBytes
+		rIrptTransformExterno.PARAM.FLAG_EXTRA_RECORD = 0;
+
+		Irpt_SumarizaTransformacao_v2@vivo_common_procedures(rIrptTransformExterno);
+
+
+		if ( grIrptStage == MAP(0) ) 
+		{
+			ALLOCATE(grIrptStage); 
+			CLEAR(grIrptStage, ' '); 
+			CLEAR(grIrptStage.PARAM, ' ');
+		}
+		grIrptStage.STATUS 				= CONCAT("E", gsCritica);
+		grIrptStage.CENTRAL				= gsCodCentral;
+		grIrptStage.COD_ERRO			= "";
+		grIrptStage.CLASSIFICACAO		= "";
+		grIrptStage.TIPO_CDR 			= "";
+		grIrptStage.PARAM.LAYOUT_CDR 	= "";
+		grIrptStage.PARAM.TIPO_NUM_A 	= "";
+		grIrptStage.PARAM.TIPO_NUM_B 	= "";
+		grIrptStage.PARAM.TIPO_NUM_C 	= "";
+		grIrptStage.DATA_HR_EVENTO		= gsStartTime; //sDataHoraEvento (YYYYMMDDHHMMSS);
+		grIrptStage.TOTAL_SEGUNDOS		= "";
+		grIrptStage.TOTAL_BYTES 		= "1"; //sBytes
+		grIrptStage.PARAM.FLAG_EXTRA_RECORD	= 0;
+
+		Irpt_SumarizaTransfStage@vivo_common_procedures(grIrptStage);
+		//Fim IRPT (Inter-mediatE Reporting)
+		//--------------------------------------------------------------
+
+		//Escreve mensagem de erro antes de enviar a EPS
+		cgdc_error_code_write(gsCritica, "MINOR",
+			"[%s|%s] [%s] [%s:%d] [%s]",
+	       		gsExtEquip, gsPortalEntrada, "GPRS",
+	 		$scriptname, $linenumber, gsFilename);
+
+		Mensagens_EPS@vivo_common_procedures (gsCritica, "GPRS");
+
+	    if (sDestino == "R") // EPS Reject
+	    {
+			DCS_RETURN_REJECT;
+	    }
+	    else if (sDestino == "S") // EPS Suspend
+	    {
+			DCS_RETURN_SUSPEND;
+	    }
+	}
+	else
+	{
+
+	    //--------------------------------------------------------------
+		//Inicio IRPT (Inter-mediatE Reporting)
+		//Sumariza informacoes dos registros criticados.
+
+		if ( rIrptTransformExterno == MAP(0) )
+		{
+			ALLOCATE(rIrptTransformExterno); 
+			CLEAR(rIrptTransformExterno, ' '); 
+			CLEAR(rIrptTransformExterno.PARAM, ' ');
+		}
+
+		rIrptTransformExterno.STATUS 			= CONCAT("C", gsCritica);
+		rIrptTransformExterno.CENTRAL			= gsCodCentral;
+		rIrptTransformExterno.COD_ERRO			= "";
+		rIrptTransformExterno.TIPO_CDR 			= "";
+		rIrptTransformExterno.PARAM.LAYOUT_CDR 	= "";
+		rIrptTransformExterno.PARAM.TIPO_NUM_A 	= "";
+		rIrptTransformExterno.PARAM.TIPO_NUM_B 	= "";
+		rIrptTransformExterno.PARAM.TIPO_NUM_C 	= "";
+		rIrptTransformExterno.DATA_HR_EVENTO 	= gsStartTime; //sDataHoraEvento (YYYYMMDDHHMMSS);
+		rIrptTransformExterno.TOTAL_SEGUNDOS 	= ""; //sSegundos
+		rIrptTransformExterno.TOTAL_BYTES 		= "1"; //sBytes
+		rIrptTransformExterno.PARAM.FLAG_EXTRA_RECORD = 0;
+
+		Irpt_SumarizaTransformacao_v2@vivo_common_procedures(rIrptTransformExterno);
+
+		if ( grIrptStage == MAP(0) ) 
+		{
+			ALLOCATE(grIrptStage); 
+			CLEAR(grIrptStage, ' '); 
+			CLEAR(grIrptStage.PARAM, ' ');
+		}
+
+		grIrptStage.STATUS 				= CONCAT("C", gsCritica);
+		grIrptStage.CENTRAL				= gsCodCentral;
+		grIrptStage.COD_ERRO			= "";
+		grIrptStage.CLASSIFICACAO		= "";
+		grIrptStage.TIPO_CDR 			= "";
+		grIrptStage.PARAM.LAYOUT_CDR 	= "";
+		grIrptStage.PARAM.TIPO_NUM_A 	= "";
+		grIrptStage.PARAM.TIPO_NUM_B 	= "";
+		grIrptStage.PARAM.TIPO_NUM_C 	= "";
+		grIrptStage.DATA_HR_EVENTO		= gsStartTime; //sDataHoraEvento (YYYYMMDDHHMMSS);
+		grIrptStage.TOTAL_SEGUNDOS		= "";
+		grIrptStage.TOTAL_BYTES 		= "1"; //sBytes
+		grIrptStage.PARAM.FLAG_EXTRA_RECORD	= 0;
+
+		Irpt_SumarizaTransfStage@vivo_common_procedures(grIrptStage);
+		
+		if (sDestino == "A" || sDestino == "D") // gera arquivo ASCII  1140803 - bigdata
+		{
+			TRACE1(("CriticaCDR - Gera saida do Big Data\n"));
+
+			//disables manual output
+			dcs_cgdc_opmgr_manual_output (FALSE);
+
+			rCritica = MAP(output);
+			rCritica.ASCII_DATA = concat(gsCritica,rCritica.ASCII_DATA);
+			sAux = rCritica.ASCII_DATA;
+			DCS_SET_OUTPUT_RECORD_LENGTH (giRecordLength + 3);
+			DCS_ADD_PORTAL ("BIGDATA");
+
+			if (sDestino == "A") // gera arquivo ASCII
+			{
+				DCS_ADD_PORTAL ("UNBILL");
+			}
+			
+			DCS_RETURN_OK;
+		}
+	}
+}// Fim CriticaCDR
+
+//******************************************************************************
+// Procedure:   Pow
+// Objetivo:    calcula a potencia de um numero
+//      Ex1: Pow(5,2) eh igual a 5^2 == 25
+//      Ex2: Pow(3,3) eh igual a 3^3 == 27
+//      Ex3: Pow(2,5) eh igual a 2^5 == 32
+// Retorno: Resultado da potenciacao
+//******************************************************************************
+procedure Pow
+(
+        integer iNumA,
+        integer iNumB
+) returns unsigned long integer
+{
+        if(iNumB <= 0 )
+        {
+                return 1;
+        }
+        else
+        {
+                return iNumA * Pow(iNumA, iNumB-1);
+        }
+}//End Pow
+
+//******************************************************************************
+// Procedure:   hex_to_long
+// Objetivo:    Converte um valor hexa para decimal e retorna um long integer
+// OBS: NAO use essa procedure. Use a procedure hex_to_decimal
+// Retorno: Resultado da potenciacao
+//******************************************************************************
+procedure hex_to_long
+(
+        string sHex,
+        integer iNum
+) returns long integer
+{
+        declare integer iNumber;
+        iNumber = 0;
+
+        if(sizeof(sHex) == 0)
+        {
+                return 0;
+        }
+        else
+        {       iNumber = TABLE(cgdc_suffix(sHex,1))
+                {
+                        "A"+    => 10;
+                        "B"+    => 11;
+                        "C"+    => 12;
+                        "D"+    => 13;
+                        "E"+    => 14;
+                        "F"+    => 15;
+                        default => same;
+                }
+
+                return hex_to_long(cgdc_prefix(sHex,sizeof(sHex)-1), (iNum+1)) + (iNumber * Pow(16,iNum));
+        }
+}//End hex_to_long
+
+//******************************************************************************
+// Procedure:   hex_to_decimal
+// Objetivo:    Converte um valor hexa para decimal e retorna uma string
+// Retorno:     Decimal em String
+//******************************************************************************
+procedure hex_to_decimal
+
+(
+	string sHex
+) returns string
+{
+        declare string sDecimal;
+        sDecimal = "";
+
+		sDecimal = hex_to_long(sHex, 0);
+        sDecimal = cgdc_trim(sDecimal, ' ',CGDC_TRIM_RIGHT);
+        sDecimal = cgdc_trim(sDecimal, ' ', 0); //left trim
+
+        return sDecimal;
+
+}//End hex_to_decimal
+
+//******************************************************************************
+// Procedure:   FiltraCenario
+// Objetivo:    Filtra cenario com base na tabela vivo_tab_sep_cdr_dados
+// Retorno:     Decimal em String
+//******************************************************************************
+procedure FiltraCenario
+(
+	string sMSISDN
+)returns integer
+{
+    declare datetime_string sData;
+    declare string sAux_MSISDN;
+	declare integer iRetorno;
+
+	iRetorno = FALSE;
+    
+	//TRACE(CONCAT("sMSISDN [",sMSISDN,"] \n"));
+    
+    sAux_MSISDN = sMSISDN;
+     
+    if (PREFIX(sAux_MSISDN,2) == "55")
+    {
+        sAux_MSISDN = cgdc_substring(sAux_MSISDN,2,-1);
+    } 
+    else
+    {
+        sAux_MSISDN = sMSISDN;
+    }
+               
+    sData = cgdc_get_local_time();      
+    sData = prefix(sData,14);
+    
+    if(VerificaSelCDRCenario2@vivo_common_procedures(sAux_MSISDN,sData, hdl_SepCDRCenario, rec_SepCDRCenario))
+    {         
+    	iRetorno = TRUE;
+    }
+   
+    return iRetorno;
+}
+
+//-----------------------------------------------------------------------------
+//                             C O M M I T
+//-----------------------------------------------------------------------------
+// Called after all records are processed and after the main script was invoked
+// for the last time. If the operation fails, this routine is not called.
+//-----------------------------------------------------------------------------
+procedure commit()
+{
+	TRACE1 ( ("\n:[C O M M I T] INICIO " ) );
+
+	//-------------------------------------------------------------------------
+	//IRPT (Inter-mediatE Reporting)
+
+	//Gera mensagem DPM (Data Processing Message) com total de registros no
+	//arquivo de entrada.
+	Irpt_GeraLogEntrada_VozDados@vivo_common_procedures("DADOS");
+	
+	//Gera mensagem DPM (Data Processing Message) com sumarizacao dos
+	//registros tratados na transformacao.
+	Irpt_GeraLogTransformacao@vivo_common_procedures("DADOS_v2","567");  //Etapa
+	Irpt_GeraLogTransfStage@vivo_common_procedures("DADOS_v2","567");  //Etapa
+	//---------------------------------------------------------------------------
+
+	TRACE1 ( ("\n:[C O M M I T] " ) );
+
+	DCS_RETURN_OK;
+}
